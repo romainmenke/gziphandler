@@ -2,7 +2,6 @@ package gziphandler
 
 import (
 	"bufio"
-	"compress/gzip"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/klauspost/compress/gzip"
 )
 
 const (

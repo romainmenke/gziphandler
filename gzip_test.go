@@ -2,7 +2,6 @@ package gziphandler
 
 import (
 	"bytes"
-	"compress/gzip"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -12,6 +11,8 @@ import (
 	"net/url"
 	"strconv"
 	"testing"
+
+	"github.com/klauspost/compress/gzip"
 
 	"github.com/stretchr/testify/assert"
 )
