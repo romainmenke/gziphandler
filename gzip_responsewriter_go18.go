@@ -7,7 +7,7 @@ import "net/http"
 // Push initiates an HTTP/2 server push.
 // Push returns ErrNotSupported if the client has disabled push or if push
 // is not supported on the underlying connection.
-func (w *GzipResponseWriter) Push(target string, opts *http.PushOptions) error {
+func (w *h2) Push(target string, opts *http.PushOptions) error {
 	pusher, ok := w.ResponseWriter.(http.Pusher)
 	if ok && pusher != nil {
 		return pusher.Push(target, setAcceptEncodingForPushOptions(opts))

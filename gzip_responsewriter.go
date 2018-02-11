@@ -1,11 +1,10 @@
 package gziphandler
 
 import (
-	"bufio"
 	"compress/gzip"
 	"fmt"
 	"io"
-	"net"
+	"io/ioutil"
 	"net/http"
 )
 
@@ -18,20 +17,23 @@ type GzipResponseWriter struct {
 	index int // Index for gzipWriterPools.
 	gw    *gzip.Writer
 
-	code int // Saves the WriteHeader value.
+	code          int // Saves the WriteHeader value.
+	headerWritten bool
 
 	minSize int    // Specifed the minimum response size to gzip. If the response length is bigger than this value, it is compressed.
 	buf     []byte // Holds the first part of the write before reaching the minSize or the end of the write.
 
 	contentTypes []string // Only compress if the response is one of these content-types. All are accepted if empty.
+
+	gzipResponse bool
 }
 
-type GzipResponseWriterWithCloseNotify struct {
-	*GzipResponseWriter
-}
-
-func (w GzipResponseWriterWithCloseNotify) CloseNotify() <-chan bool {
+func (w GzipResponseWriter) CloseNotify() <-chan bool {
 	return w.ResponseWriter.(http.CloseNotifier).CloseNotify()
+}
+
+func (w *GzipResponseWriter) WriteString(s string) (int, error) {
+	return w.Write([]byte(s))
 }
 
 // Write appends data to the gzip writer.
@@ -49,13 +51,21 @@ func (w *GzipResponseWriter) Write(b []byte) (int, error) {
 	}
 
 	// Save the write into a buffer for later use in GZIP responseWriter (if content is long enough) or at close with regular responseWriter.
-	// On the first write, w.buf changes from nil to a valid slice
+	// On the first write, w.buf is set to a slice of size w.minSize.
+	if w.buf == nil {
+		w.buf = make([]byte, 0, w.minSize)
+	}
+
 	w.buf = append(w.buf, b...)
 
 	// If the global writes are bigger than the minSize and we're about to write
 	// a response containing a content type we want to handle, enable
 	// compression.
 	if len(w.buf) >= w.minSize && handleContentType(w.contentTypes, w) && w.Header().Get(contentEncoding) == "" {
+		w.gzipResponse = true
+	}
+
+	if w.gzipResponse {
 		err := w.startGzip()
 		if err != nil {
 			return 0, err
@@ -67,6 +77,10 @@ func (w *GzipResponseWriter) Write(b []byte) (int, error) {
 
 // startGzip initialize any GZIP specific informations.
 func (w *GzipResponseWriter) startGzip() error {
+	// startGzip needs to be idempotent
+	if w.gw != nil {
+		return nil
+	}
 
 	// Set the GZIP header.
 	w.Header().Set(contentEncoding, "gzip")
@@ -77,9 +91,7 @@ func (w *GzipResponseWriter) startGzip() error {
 	w.Header().Del(contentLength)
 
 	// Write the header to gzip response.
-	if w.code != 0 {
-		w.ResponseWriter.WriteHeader(w.code)
-	}
+	w.writeHeader()
 
 	// Initialize the GZIP response.
 	w.init()
@@ -100,9 +112,24 @@ func (w *GzipResponseWriter) startGzip() error {
 
 // WriteHeader just saves the response code until close or GZIP effective writes.
 func (w *GzipResponseWriter) WriteHeader(code int) {
-	if w.code == 0 {
-		w.code = code
+	if w.code != 0 || w.headerWritten {
+		return
 	}
+
+	w.code = code
+}
+
+func (w *GzipResponseWriter) writeHeader() {
+	if w.headerWritten {
+		return
+	}
+
+	if w.code == 0 {
+		return
+	}
+
+	w.headerWritten = true
+	w.ResponseWriter.WriteHeader(w.code)
 }
 
 // init graps a new gzip writer from the gzipWriterPool and writes the correct
@@ -117,54 +144,66 @@ func (w *GzipResponseWriter) init() {
 
 // Close will close the gzip.Writer and will put it back in the gzipWriterPool.
 func (w *GzipResponseWriter) Close() error {
+	w.writeHeader()
+
 	if w.gw == nil {
 		// Gzip not trigged yet, write out regular response.
-		if w.code != 0 {
-			w.ResponseWriter.WriteHeader(w.code)
-		}
+
 		if w.buf != nil {
-			_, writeErr := w.ResponseWriter.Write(w.buf)
+			_, err := w.ResponseWriter.Write(w.buf)
 			// Returns the error if any at write.
-			if writeErr != nil {
-				return fmt.Errorf("gziphandler: write to regular responseWriter at close gets error: %q", writeErr.Error())
+			if err != nil {
+				return fmt.Errorf("gziphandler: write to regular responseWriter at close gets error: %q", err.Error())
 			}
 		}
 		return nil
 	}
 
-	err := w.gw.Close()
-	gzipWriterPools[w.index].Put(w.gw)
+	gzw := w.gw
 	w.gw = nil
-	return err
+
+	defer gzipWriterPools[w.index].Put(gzw)
+	defer gzw.Reset(ioutil.Discard)
+	defer gzw.Close()
+
+	err := gzw.Close()
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Flush flushes the underlying *gzip.Writer and then the underlying
 // http.ResponseWriter if it is an http.Flusher. This makes GzipResponseWriter
 // an http.Flusher.
 func (w *GzipResponseWriter) Flush() {
-	if w.gw == nil {
-		// Only flush once startGzip has been called.
-		//
-		// Flush is thus a no-op until the written body
-		// exceeds minSize.
+	if w.gw != nil {
+		w.gw.Flush()
+
+		if fw, ok := w.ResponseWriter.(http.Flusher); ok {
+			fw.Flush()
+		}
+
 		return
 	}
 
-	w.gw.Flush()
-
-	if fw, ok := w.ResponseWriter.(http.Flusher); ok {
-		fw.Flush()
+	if _, ok := w.ResponseWriter.(http.Flusher); ok {
+		w.flushEarly()
 	}
 }
 
-// Hijack implements http.Hijacker. If the underlying ResponseWriter is a
-// Hijacker, its Hijack method is returned. Otherwise an error is returned.
-func (w *GzipResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
-		return hj.Hijack()
+func (w *GzipResponseWriter) flushEarly() {
+	fw, ok := w.ResponseWriter.(http.Flusher)
+	if !ok {
+		return
 	}
-	return nil, nil, fmt.Errorf("http.Hijacker interface is not supported")
-}
 
-// verify Hijacker interface implementation
-var _ http.Hijacker = &GzipResponseWriter{}
+	if w.Header().Get(contentEncoding) == "gzip" && handleContentType(w.contentTypes, w) {
+		w.Header().Del(contentLength)
+		w.gzipResponse = true
+	}
+
+	w.writeHeader()
+	fw.Flush()
+}

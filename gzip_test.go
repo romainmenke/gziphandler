@@ -49,7 +49,7 @@ func TestGzipHandler(t *testing.T) {
 	// requests without accept-encoding are passed along as-is
 
 	req1, _ := http.NewRequest("GET", "/whatever", nil)
-	resp1 := httptest.NewRecorder()
+	resp1 := newRecorder()
 	handler.ServeHTTP(resp1, req1)
 	res1 := resp1.Result()
 
@@ -62,7 +62,7 @@ func TestGzipHandler(t *testing.T) {
 
 	req2, _ := http.NewRequest("GET", "/whatever", nil)
 	req2.Header.Set("Accept-Encoding", "gzip")
-	resp2 := httptest.NewRecorder()
+	resp2 := newRecorder()
 	handler.ServeHTTP(resp2, req2)
 	res2 := resp2.Result()
 
@@ -75,7 +75,7 @@ func TestGzipHandler(t *testing.T) {
 
 	req3, _ := http.NewRequest("GET", "/whatever", nil)
 	req3.Header.Set("Accept-Encoding", "gzip")
-	res3 := httptest.NewRecorder()
+	res3 := newRecorder()
 	handler.ServeHTTP(res3, req3)
 
 	assert.Equal(t, http.DetectContentType([]byte(testBody)), res3.Header().Get("Content-Type"))
@@ -86,7 +86,7 @@ func TestGzipHandlerAlreadyCompressed(t *testing.T) {
 
 	req, _ := http.NewRequest("GET", "/gzipped", nil)
 	req.Header.Set("Accept-Encoding", "gzip")
-	res := httptest.NewRecorder()
+	res := newRecorder()
 	handler.ServeHTTP(res, req)
 
 	assert.Equal(t, testBody, res.Body.String())
@@ -106,7 +106,7 @@ func TestNewGzipLevelHandler(t *testing.T) {
 
 		req, _ := http.NewRequest("GET", "/whatever", nil)
 		req.Header.Set("Accept-Encoding", "gzip")
-		resp := httptest.NewRecorder()
+		resp := newRecorder()
 		wrapper(handler).ServeHTTP(resp, req)
 		res := resp.Result()
 
@@ -154,7 +154,7 @@ func TestGzipHandlerNoBody(t *testing.T) {
 			w.WriteHeader(test.statusCode)
 		}))
 
-		rec := httptest.NewRecorder()
+		rec := newRecorder()
 		// TODO: in Go1.7 httptest.NewRequest was introduced this should be used
 		// once 1.6 is not longer supported.
 		req := &http.Request{
@@ -253,7 +253,7 @@ func TestGzipHandlerMinSize(t *testing.T) {
 
 	// Short response is not compressed
 	responseLength = 127
-	w := httptest.NewRecorder()
+	w := newRecorder()
 	handler.ServeHTTP(w, r)
 	if w.Result().Header.Get(contentEncoding) == "gzip" {
 		t.Error("Expected uncompressed response, got compressed")
@@ -261,7 +261,7 @@ func TestGzipHandlerMinSize(t *testing.T) {
 
 	// Long response is not compressed
 	responseLength = 128
-	w = httptest.NewRecorder()
+	w = newRecorder()
 	handler.ServeHTTP(w, r)
 	if w.Result().Header.Get(contentEncoding) != "gzip" {
 		t.Error("Expected compressed response, got uncompressed")
@@ -282,7 +282,7 @@ func TestGzipDoubleClose(t *testing.T) {
 
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Accept-Encoding", "gzip")
-	w := httptest.NewRecorder()
+	w := newRecorder()
 	handler.ServeHTTP(w, r)
 
 	// the second close shouldn't have added the same writer
@@ -297,7 +297,7 @@ func TestStatusCodes(t *testing.T) {
 	handler := GzipHandler(http.NotFoundHandler())
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Accept-Encoding", "gzip")
-	w := httptest.NewRecorder()
+	w := newRecorder()
 	handler.ServeHTTP(w, r)
 
 	result := w.Result()
@@ -309,13 +309,14 @@ func TestStatusCodes(t *testing.T) {
 func TestFlushBeforeWrite(t *testing.T) {
 	b := []byte(testBody)
 	handler := GzipHandler(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		rw.Header().Set("Content-Encoding", "gzip")
 		rw.WriteHeader(http.StatusNotFound)
 		rw.(http.Flusher).Flush()
 		rw.Write(b)
 	}))
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("Accept-Encoding", "gzip")
-	w := httptest.NewRecorder()
+	w := newRecorder()
 	handler.ServeHTTP(w, r)
 
 	res := w.Result()
@@ -324,55 +325,6 @@ func TestFlushBeforeWrite(t *testing.T) {
 	assert.NotEqual(t, b, w.Body.Bytes())
 }
 
-func TestImplementCloseNotifier(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/", nil)
-	request.Header.Set(acceptEncoding, "gzip")
-	GzipHandler(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request){
-		_, ok := rw.(http.CloseNotifier)
-		assert.True(t, ok, "response writer must implement http.CloseNotifier")
-	})).ServeHTTP(&mockRWCloseNotify{}, request)
-}
-
-func TestImplementFlusherAndCloseNotifier(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/", nil)
-	request.Header.Set(acceptEncoding, "gzip")
-	GzipHandler(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request){
-		_, okCloseNotifier := rw.(http.CloseNotifier)
-		assert.True(t, okCloseNotifier, "response writer must implement http.CloseNotifier")
-		_, okFlusher := rw.(http.Flusher)
-		assert.True(t, okFlusher, "response writer must implement http.Flusher")
-	})).ServeHTTP(&mockRWCloseNotify{}, request)
-}
-
-func TestNotImplementCloseNotifier(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/", nil)
-	request.Header.Set(acceptEncoding, "gzip")
-	GzipHandler(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request){
-		_, ok := rw.(http.CloseNotifier)
-		assert.False(t, ok, "response writer must not implement http.CloseNotifier")
-	})).ServeHTTP(httptest.NewRecorder(), request)
-}
-
-
-type mockRWCloseNotify struct{}
-
-func (m *mockRWCloseNotify) CloseNotify() <-chan bool {
-	panic("implement me")
-}
-
-func (m *mockRWCloseNotify) Header() http.Header {
-	return http.Header{}
-}
-
-func (m *mockRWCloseNotify) Write([]byte) (int, error) {
-	panic("implement me")
-}
-
-func (m *mockRWCloseNotify) WriteHeader(int) {
-	panic("implement me")
-}
-
-
 func TestIgnoreSubsequentWriteHeader(t *testing.T) {
 	handler := GzipHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
@@ -380,7 +332,7 @@ func TestIgnoreSubsequentWriteHeader(t *testing.T) {
 	}))
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Accept-Encoding", "gzip")
-	w := httptest.NewRecorder()
+	w := newRecorder()
 	handler.ServeHTTP(w, r)
 
 	result := w.Result()
@@ -404,7 +356,7 @@ func TestDontWriteWhenNotWrittenTo(t *testing.T) {
 
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Accept-Encoding", "gzip")
-	w := httptest.NewRecorder()
+	w := newRecorder()
 	handler1.ServeHTTP(w, r)
 
 	result := w.Result()
@@ -460,7 +412,7 @@ func TestContentTypes(t *testing.T) {
 
 		req, _ := http.NewRequest("GET", "/whatever", nil)
 		req.Header.Set("Accept-Encoding", "gzip")
-		resp := httptest.NewRecorder()
+		resp := newRecorder()
 		wrapper(handler).ServeHTTP(resp, req)
 		res := resp.Result()
 
@@ -518,7 +470,7 @@ func benchmark(b *testing.B, parallel bool, size int) {
 }
 
 func runBenchmark(b *testing.B, req *http.Request, handler http.Handler) {
-	res := httptest.NewRecorder()
+	res := newRecorder()
 	handler.ServeHTTP(res, req)
 	if code := res.Code; code != 200 {
 		b.Fatalf("Expected 200 but got %d", code)

@@ -5,6 +5,20 @@ import (
 	"net/http"
 )
 
+const (
+	protoHTTP11    = "HTTP/1.1"
+	protoHTTP11TLS = "HTTP/1.1+TLS"
+	protoHTTP20    = "HTTP/2.0"
+)
+
+// GzipHandler wraps an HTTP handler, to transparently gzip the response body if
+// the client supports it (via the Accept-Encoding header). This will compress at
+// the default compression level.
+func GzipHandler(h http.Handler) http.Handler {
+	wrapper, _ := NewGzipLevelHandler(gzip.DefaultCompression)
+	return wrapper(h)
+}
+
 // MustNewGzipLevelHandler behaves just like NewGzipLevelHandler except that in
 // an error case it panics rather than returning an error.
 func MustNewGzipLevelHandler(level int) func(http.Handler) http.Handler {
@@ -57,26 +71,25 @@ func GzipHandlerWithOpts(opts ...option) (func(http.Handler) http.Handler, error
 					minSize:        c.minSize,
 					contentTypes:   c.contentTypes,
 				}
-				defer gw.Close()
 
-				if _, ok := w.(http.CloseNotifier); ok {
-					gwcn := GzipResponseWriterWithCloseNotify{gw}
-					h.ServeHTTP(gwcn, r)
-				} else {
-					h.ServeHTTP(gw, r)
+				var protoGW http.ResponseWriter
+				switch r.Proto {
+				case protoHTTP11, protoHTTP11TLS:
+					protoGW = &h1{gw}
+				case protoHTTP20:
+					protoGW = &h2{gw}
+				default:
+					protoGW = gw
 				}
 
-			} else {
-				h.ServeHTTP(w, r)
+				defer gw.Close()
+
+				h.ServeHTTP(protoGW, r)
+				return
+
 			}
+
+			h.ServeHTTP(w, r)
 		})
 	}, nil
-}
-
-// GzipHandler wraps an HTTP handler, to transparently gzip the response body if
-// the client supports it (via the Accept-Encoding header). This will compress at
-// the default compression level.
-func GzipHandler(h http.Handler) http.Handler {
-	wrapper, _ := NewGzipLevelHandler(gzip.DefaultCompression)
-	return wrapper(h)
 }
